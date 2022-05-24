@@ -217,10 +217,8 @@ end
 
 # collect _top level_ eqs including from extension + currents + reversals + Vₘ
 function get_eqs(x::AbstractCompartmentSystem; rebuild = false)
-    #if rebuild || isempty(getfield(x, :eqs))
         empty!(getfield(x, :eqs))
         union!(getfield(x, :eqs), build_toplevel(x)[1])
-    #end
     return getfield(x, :eqs)
 end
 
@@ -241,10 +239,8 @@ end
 
 function get_systems(x::AbstractCompartmentSystem; rebuild = false)
     # collect channels + synapses + input systems
-    #if rebuild || isempty(getfield(x, :systems))
         empty!(getfield(x, :systems))
         union!(getfield(x, :systems), getfield(x, :chans), getfield(x, :synapses))
-    #end
     return getfield(x, :systems)
 end
 
