@@ -30,8 +30,7 @@ function HodgkinHuxley(
     geometry::Geometry = Point(),
     stimuli::Vector{Equation} = Equation[])
 
-    @parameters cₘ = ustrip(Float64, mF/cm^2, capacitance)
-
+    @parameters cₘ = ustrip(Float64, µF/cm^2, capacitance) [unit=µF/cm^2]
     synaptic_channels = Vector{AbstractConductanceSystem}()
     synaptic_reversals = Vector{Num}()
     axial_conductances = Vector{Tuple{AbstractConductanceSystem,Num}}()
@@ -80,25 +79,10 @@ end
 
 const Compartment = CompartmentSystem
 
-struct GeneratedCollections
-    eqs::Vector{Equation}
-    dvs::Set{Num}
-    ps::Set{Num}
-    systems::Vector{AbstractTimeDependentSystem}
-    observed::Vector{Equation}
-    defs::Dict
-end
-
-function GeneratedCollections(; eqs = Equation[], systems = AbstractTimeDependentSystem[],
-                              observed = Equation[], dvs = Set{Num}(), ps  = Set{Num}(),
-                              defs = Dict())
-    return GeneratedCollections(eqs, dvs, ps, systems, observed, defs)
-end
-
-function process_reversals!(gen, dynamics)
+function process_reversals!(gen, dynamics::HodgkinHuxley)
     reversal_equation_vars = Set{Num}()
-    @unpack channel_reversals, synaptic_reversals, axial_conductances = dynamics
-    @unpack dvs, ps, eqs = gen
+    (; channel_reversals, synaptic_reversals, axial_conductances) = dynamics
+    (; dvs, ps, eqs) = gen
     all_reversals = union(channel_reversals, synaptic_reversals, last.(axial_conductances))
 
     for Erev in all_reversals
@@ -118,10 +102,10 @@ function process_reversals!(gen, dynamics)
     return nothing
 end
 
-function generate_currents!(gen, dynamics, Vₘ, aₘ)
-    @unpack channels, channel_reversals, synaptic_channels, synaptic_reversals,
-            axial_conductances = dynamics
-    @unpack eqs, dvs = gen
+function generate_currents!(gen, dynamics::HodgkinHuxley, Vₘ, aₘ)
+    (; channels, channel_reversals, synaptic_channels, synaptic_reversals,
+     axial_conductances) = dynamics
+    (; eqs, dvs) = gen
     paired_channels = zip(channels,
                           broadcast(chan -> find_reversal(chan, channel_reversals), channels))
     paired_synapses = zip(synaptic_channels,
@@ -131,15 +115,16 @@ function generate_currents!(gen, dynamics, Vₘ, aₘ)
     for (chan, Erev) in paired_conductances
         I = IonCurrent(chan)
         g = renamespace(chan, get_output(chan))
-        push!(eqs, I ~ g*(Vₘ - Erev)*(1*getmetadata(g, ConductorUnits) isa SpecificConductance ? aₘ : 1))
+        eq = I ~ g*(Vₘ - Erev)*(1*get_unit(g) isa SpecificConductance ? aₘ : 1)
+        validate(eq) && push!(eqs, eq)
         push!(dvs, I)
         push!(currents, I)
     end
     return currents
 end
 
-function process_stimuli!(currents, gen, dynamics)
-    @unpack eqs, dvs, ps, defs = gen
+function process_stimuli!(currents, gen, dynamics::HodgkinHuxley)
+    (; eqs, dvs, ps, defs) = gen
     for stimulus in dynamics.stimuli
         I = only(get_variables(stimulus.lhs))
         _vars = filter!(x -> !isequal(x,t), get_variables(stimulus.rhs))
@@ -149,14 +134,14 @@ function process_stimuli!(currents, gen, dynamics)
             push!(ps, I)
             push!(currents, -I)
         else
-            push!(eqs, stimulus)
+            validate(stimulus) && push!(eqs, stimulus)
             push!(dvs, I)
             push!(currents, -I)
         end
     end
 end
 
-function resolve_channel_inputs!(gen, dynamics)
+function resolve_channel_inputs!(gen, dynamics::HodgkinHuxley)
     all_inputs = Set{Num}()
     # Resolve in/out: "connect" / auto forward cell states to channels
     for chan in union(dynamics.channels, dynamics.synaptic_channels)
@@ -170,7 +155,7 @@ function resolve_channel_inputs!(gen, dynamics)
     return all_inputs
 end
 
-function get_required_states!(gen, dynamics)
+function get_required_states!(gen, dynamics::HodgkinHuxley)
     required_states = resolve_channel_inputs!(gen, dynamics)
     internally_modified = Set{Num}()
     foreach(x -> get_variables!(internally_modified, x.lhs), gen.eqs)
@@ -186,12 +171,13 @@ function extend!(gen, extension)
 end
 
 function resolve_states!(gen, required_states)
-    @unpack eqs, dvs, ps = gen
+    (; eqs, dvs, ps) = gen
     component_currents = filter(x -> iscurrent(x) && !isaggregate(x), union(dvs,ps))
     # Resolve unavailable states
     for s in required_states
         if iscurrent(s) && isaggregate(s)
-            push!(eqs, s ~ sum(filter(x -> getion(x) == getion(s), component_currents)))
+            eq = s ~ sum(filter(x -> getion(x) == getion(s), component_currents))
+            validate(eq) && push!(eqs, eq)
             push!(dvs, s)
         end
         # etc for more switch cases...
@@ -211,29 +197,105 @@ end
 - `stimuli::Vector{Equation}`: 
 - `name::Symbol`: Name of the system.
 """
-function CompartmentSystem(dynamics::HodgkinHuxley; defaults = Dict(),
+function CompartmentSystem(dynamics; defaults = Dict(),
                            extensions::Vector{ODESystem} = ODESystem[],
                            name::Symbol = Base.gensym("Compartment")) 
     parent = Ref{AbstractCompartmentSystem}()
     return CompartmentSystem(dynamics, defaults, extensions, name, parent)
 end
 
+struct LIF <: CompartmentForm
+    V::Num
+    τ_mem::Num
+    τ_syn::Num
+    V_th::Num
+    R::Num
+    inputs::Vector{Num}
+    stimuli::Vector{Num}
+end
+
+function LIF(voltage = 0.0; tau_membrane = 10.0, tau_synaptic = 10.0, threshold = 1.0, resistance = 1.0, stimulus = 1.0)
+    @variables V(t) = voltage
+    @parameters V_th = threshold
+    @parameters τ_mem = tau_membrane τ_syn = tau_synaptic R = resistance Iₑ = stimulus
+    inputs = Num[]
+    return LIF(V, τ_mem, τ_syn, V_th, R, inputs, [Iₑ])
+end
+
+function CompartmentSystem(dynamics::LIF, defaults, extensions, name, parent)
+    (; V, τ_mem, τ_syn, V_th, R, stimuli) = dynamics
+    Iₑ = stimuli[1]
+    @variables I(t) = 0.0 S(t) = false
+    @parameters V_rest = MTK.getdefault(V)
+    gen = GeneratedCollections(dvs = Set((V, I)),
+                               ps = Set((τ_mem, τ_syn, V_th, R, V_rest, Iₑ)),
+                               eqs = [D(V) ~ (-(V-V_rest)/τ_mem) + (R*I + R*Iₑ)/τ_mem,
+                                      D(I) ~ -I/τ_syn])
+
+    (; eqs, dvs, ps, observed, systems, defs) = gen
+    push!(observed, S ~ V >= V_th)
+    merge!(defs, defaults)
+    return CompartmentSystem(dynamics, eqs, t, collect(dvs), collect(ps), observed, name,
+                             systems, defs, extensions, parent)
+end
+
+function Base.convert(::Type{ODESystem}, compartment::CompartmentSystem{LIF}; with_cb = false)
+
+    dvs = get_states(compartment)
+    ps  = get_ps(compartment)
+    eqs = get_eqs(compartment)
+    defs = get_defaults(compartment)
+    obs = get_observed(compartment)
+    syss = convert.(ODESystem, get_systems(compartment))
+    V = @nonamespace compartment.V
+    S = @nonamespace compartment.S
+    V_th = @nonamespace compartment.V_th
+    V_rest = @nonamespace compartment.V_rest
+
+    cb = with_cb ? MTK.SymbolicDiscreteCallback(V >= V_th, [V~V_rest]) : MTK.SymbolicDiscreteCallback[]
+    
+    return ODESystem(eqs, t, dvs, ps; systems = syss, defaults = defs,
+                     name = nameof(compartment), discrete_events = cb,
+                    observed = obs, checks = CheckComponents)
+end
+#=
+function Base.convert(::Type{SDESystem}, compartment::CompartmentSystem{LIF}; with_cb = false)
+
+    dvs = get_states(compartment)
+    ps  = get_ps(compartment)
+    eqs = get_eqs(compartment)
+    defs = get_defaults(compartment)
+    obs = get_observed(compartment)
+    syss = convert.(ODESystem, get_systems(compartment))
+    V = @nonamespace compartment.V
+    S = @nonamespace compartment.S
+    V_th = @nonamespace compartment.V_th
+    V_rest = @nonamespace compartment.V_rest
+
+    cb = with_cb ? MTK.SymbolicDiscreteCallback(V >= V_th, [V~V_rest]) : MTK.SymbolicDiscreteCallback[]
+    
+    noise_eqs = [0.0, 1.0]
+    return SDESystem(eqs, noise_eqs, t, dvs, ps; systems = syss, defaults = defs,
+                     name = nameof(compartment), discrete_events = cb, observed = obs)
+end
+=#
 function CompartmentSystem(dynamics::HodgkinHuxley, defaults, extensions, name, parent)
 
-    @unpack channels, synaptic_channels, axial_conductances, stimuli = dynamics
-    @parameters aₘ = area(dynamics.geometry)
+    (; channels, synaptic_channels, axial_conductances, stimuli) = dynamics
+    @parameters aₘ = area(dynamics.geometry) [unit=cm^2]
     Vₘ, cₘ = dynamics.voltage, dynamics.capacitance
     gen = GeneratedCollections(dvs = Set(Vₘ), ps = Set((aₘ,cₘ)),
                                systems = union(channels, synaptic_channels,
                                                first.(axial_conductances)))
-    @unpack eqs, dvs, ps, observed, systems, defs = gen
+    (; eqs, dvs, ps, observed, systems, defs) = gen
     
     # Compile dynamics into system equations, states, parameters, etc
     process_reversals!(gen, dynamics)
     currents = generate_currents!(gen, dynamics, Vₘ, aₘ)
     process_stimuli!(currents, gen, dynamics)
     # Voltage equation
-    push!(eqs, D(Vₘ) ~ -sum(currents)/(cₘ*aₘ))
+    eq = D(Vₘ) ~ -sum(currents)/(cₘ*aₘ)
+    validate(eq) && push!(eqs, eq)
     # Apply extensions
     extend_gen! = Base.Fix1(extend!, gen)
     foreach(extend_gen!, extensions)
@@ -317,6 +379,7 @@ function Base.convert(::Type{ODESystem}, compartment::CompartmentSystem)
     syss = convert.(ODESystem, get_systems(compartment))
     
     return ODESystem(eqs, t, dvs, ps; systems = syss, defaults = defs,
-                     name = nameof(compartment))
+                     name = nameof(compartment), checks = CheckComponents)
 end
+
 

@@ -1,8 +1,8 @@
 
 module SimpleSynapse
 
-using Test, Conductor, IfElse, OrdinaryDiffEq, Unitful, ModelingToolkit
-import Unitful: mV, mS, cm, pA, nA, ms, nS, pS, µA, µm
+using Test, Conductor, OrdinaryDiffEq, Unitful, ModelingToolkit
+import Unitful: mV, mS, cm, µm, pA, nA, mA, µA, ms, nS, pS
 import Conductor: Na, K
 
 @testset "Simple excitatory synapse" begin
@@ -11,7 +11,7 @@ Vₘ = MembranePotential(-65mV)
 
 nav_kinetics = [
     Gate(AlphaBeta,
-         IfElse.ifelse(Vₘ == -40.0, 1.0, (0.1*(Vₘ + 40.0))/(1.0 - exp(-(Vₘ + 40.0)/10.0))),
+         ifelse(Vₘ == -40.0, 1.0, (0.1*(Vₘ + 40.0))/(1.0 - exp(-(Vₘ + 40.0)/10.0))),
          4.0*exp(-(Vₘ + 65.0)/18.0),
          p = 3, name = :m)
     Gate(AlphaBeta,
@@ -20,18 +20,21 @@ nav_kinetics = [
 
 kdr_kinetics = [
     Gate(AlphaBeta,
-         IfElse.ifelse(Vₘ == -55.0, 0.1, (0.01*(Vₘ + 55.0))/(1.0 - exp(-(Vₘ + 55.0)/10.0))),
+         ifelse(Vₘ == -55.0, 0.1, (0.01*(Vₘ + 55.0))/(1.0 - exp(-(Vₘ + 55.0)/10.0))),
          0.125 * exp(-(Vₘ + 65.0)/80.0),
          p = 4, name = :n)]
 
-@named NaV = IonChannel(Sodium, nav_kinetics, max_g = 120mS/cm^2) 
+@named NaV = IonChannel(Sodium, nav_kinetics, max_g = 120mS/cm^2)
 @named Kdr = IonChannel(Potassium, kdr_kinetics, max_g = 36mS/cm^2)
 @named leak = IonChannel(Leak, max_g = 0.3mS/cm^2)
+
 channels = [NaV, Kdr, leak];
-reversals = Equilibria([Na   =>  50.0mV, K    => -77.0mV, Leak => -54.4mV])
+reversals = Equilibria([Na => 50.0mV, K => -77.0mV, Leak => -54.4mV])
 
 @named Iₑ = IonCurrent(NonIonic)
-holding_current = Iₑ ~ ustrip(Float64, µA, 5000pA)
+@named I_hold = IonCurrent(NonIonic, 5000pA, dynamic = false)
+holding_current = Iₑ ~ I_hold
+
 geo = Cylinder(radius = 25µm, height = 400µm)
 
 dynamics_1 = HodgkinHuxley(Vₘ, channels, reversals; geometry = geo, stimuli = [holding_current]);
@@ -52,21 +55,21 @@ EGlut = Equilibrium(Cation, 0mV, name = :Glut)
                parameters(Glut)]) == [2,3,1]
 
 topology = NetworkTopology([neuron1, neuron2], [Glut]);
-Conductor.add_synapse!(topology, neuron1, neuron2, Glut)
+topology[neuron1, neuron2] = Glut
 reversal_map = Dict([Glut => EGlut])
 
 @named network = NeuronalNetworkSystem(topology, reversal_map)
 
 @test length.([equations(network),
                states(network),
-               parameters(network)]) == [29,29,18]
+               parameters(network)]) == [29,29,19]
 
 ttot = 250.
 simul_sys = Simulation(network, time = ttot*ms, return_system = true)
 
 @test length.([equations(simul_sys),
                states(simul_sys),
-               parameters(simul_sys)]) == [9,9,18]
+               parameters(simul_sys)]) == [9,9,19]
 
 # Skipped because synaptic systems generated via Base.gensym
 #expect_syms = [:neuron1₊Isyn] # just take one for now
@@ -106,7 +109,7 @@ u0[12] = 0.0      # Glut1₊s
 
 # Parameters 
 # Neuron 1
-p[2]   =  0.001     # neuron1₊cₘ      
+p[2]   =  1.0       # neuron1₊cₘ      
 p[3]   =  area(geo) # neuron1₊aₘ      
 p[4]   =  50.0      # neuron1₊ENa     
 p[5]   =  -77.0     # neuron1₊EK      
@@ -116,7 +119,7 @@ p[8]   =  36.0      # neuron1₊Kdr₊gbar
 p[9]   =  0.3       # neuron1₊leak₊g  
 
 # Neuron 2
-p[10]  =  0.001     # neuron2₊cₘ      
+p[10]  =  1.0       # neuron2₊cₘ      
 p[11]  =  0.000629  # neuron2₊aₘ      
 p[12]  =  50.0      # neuron2₊ENa     
 p[13]  =  -77.0     # neuron2₊EK      
@@ -218,7 +221,7 @@ end
 
 # Solve and check for invariance
 byhand_prob = ODEProblem{true}(simple_synapse!, u0, (0.,ttot), p)
-mtk_prob = ODAEProblem(simul_sys, [], (0., ttot), [])
+mtk_prob = ODEProblem(simul_sys, [], (0., ttot), [])
 byhand_sol = solve(byhand_prob, Rosenbrock23(), reltol=1e-9, abstol=1e-9, saveat=0.025);
 current_mtk_sol = solve(mtk_prob, Rosenbrock23(), reltol=1e-9, abstol=1e-9, saveat=0.025);
 
